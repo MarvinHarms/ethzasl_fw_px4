@@ -215,7 +215,6 @@ private:
 		(ParamFloat<px4::params::DS_ORIGIN_LON>) _param_origin_lon,
 		(ParamFloat<px4::params::DS_ORIGIN_ALT>) _param_origin_alt,
 		// loiter params
-		(ParamInt<px4::params::DS_LOITER>) _param_loiter,
 		(ParamInt<px4::params::DS_W_HEADING>) _param_shear_heading,
 		(ParamFloat<px4::params::DS_W_HEIGHT>) _param_shear_height,
 		// thrust params
@@ -223,11 +222,9 @@ private:
 		// force saturation
 		(ParamInt<px4::params::DS_SWITCH_SAT>) _param_switch_saturation,
 		// hardcoded trajectory center
-		(ParamInt<px4::params::DS_SWITCH_ORI_HC>) _param_switch_origin_hardcoded,
+		(ParamInt<px4::params::DS_SWITCH_SPIRAL>) _param_switch_spiral,
 		// manual switch if manual feedthrough is used, only active in STIL mode
 		(ParamInt<px4::params::DS_SWITCH_MANUAL>) _param_switch_manual,
-		// manual switch if manual feedthrough is used, REMOVE!!!
-		(ParamInt<px4::params::DS_SWITCH_CLOOP>) _param_switch_cloop,
 		// manual switch if we are in SITL mode
 		(ParamInt<px4::params::DS_SWITCH_SITL>) _param_switch_sitl
 
@@ -269,13 +266,11 @@ private:
 	//
 	void		status_publish();
 
-	const static size_t _num_basis_funs = 16;			// number of basis functions used for the trajectory approximation
+	const static size_t _num_basis_funs = 18;			// number of basis functions used for the trajectory approximation
 
 	// controller methods
 	void _compute_trajectory_transform();						// compute the transform between trajectory frame and ENU frame (soaring frame) based on shear params
-	void _select_loiter_trajectory();			// select the correct loiter trajectory based on available energy
-	void _select_soaring_trajectory();			// select the correct loiter trajectory based on available energy
-	void _read_trajectory_coeffs_csv(char *filename);				// read in the correct coefficients of the appropriate trajectory
+	void _read_trajectory_coeffs(int num_cycles);				// read in the correct coefficients of the appropriate trajectory
 	float _get_closest_t(Vector3f pos);				// get the normalized time, at which the reference path is closest to the current position
 	Vector3f _compute_wind_estimate();				// compute a wind estimate to be used only inside the controller
 	Vector3f _compute_wind_estimate_EKF();			// compute a wind estimate to be used only as a measurement for the shear estimator
@@ -301,11 +296,22 @@ private:
 	int _int_to_str(int x, char str[], int d);				// convert an integer x into a string of length d
 	void _float_to_str(float n, char* res, int afterpoint);	// convert float to string
 
+	// coeffs of spiral primitive
+	float _basis_coeffs_spiral_x[_num_basis_funs] = {20.f,0.434124f,0.432262f,70.125871f,-327.180272f,862.127705f,-1695.961312f,2734.626308f,-3831.861577f,4724.288788f,-5207.474667f,5088.370127f,-4384.660820f,3222.820574f,-1987.304578f,977.925981f,-352.205735f,70.896473f};
+	float _basis_coeffs_spiral_y[_num_basis_funs] = {0.194213f,-0.194177f,-0.192487f,116.052484f,-299.744046f,469.829799f,-440.167217f,155.187837f,433.145355f,-1227.258130f,2095.847920f,-2834.686912f,3230.029194f,-3109.582693f,2450.681724f,-1553.563769f,714.657557f,-201.784569f};				// coefficients of the spiral
+	float _basis_coeffs_spiral_z[_num_basis_funs] = {123.208602f,46.791435f,76.791856f,86.490714f,-303.973859f,648.061209f,-1042.495465f,1383.884825f,-1591.526273f,1609.399421f,-1452.952833f,1151.944739f,-796.576718f,434.271967f,-180.000036f,30.532764f,10.832065f,-13.809598f};				// coefficients of the spiral
+	
+	// coeffs of init loiter circle
+	float _basis_coeffs_init_x[_num_basis_funs] = {12.693384,7.306861,7.306862,121.809973,-483.235494,1085.790487,-1883.740069,2696.916236,-3429.466934,3897.179749,-4084.807099,3897.189617,-3429.483483,2696.934382,-1883.754798,1085.800000,-483.239721,121.810967};
+	float _basis_coeffs_init_y[_num_basis_funs]  = {0.007385,-0.013951,-0.000819,222.596395,-646.826146,1208.889400,-1626.739170,1757.946407,-1471.972264,842.924474,0.134290,-843.178735,1472.187079,-1758.106312,1626.840991,-1208.941805,646.845821,-222.600461};
+	float _basis_coeffs_init_z[_num_basis_funs]  = {133.333334,66.666667,66.666667,0.000050,-0.000195,-0.000050,0.003056,-0.000742,-0.004436,-0.000822,-0.000140,-0.004587,0.000567,-0.003279,0.000143,-0.000330,0.000468,-0.000107};
+	
+	// coeffs of currently active trajec
+	Vector<float, _num_basis_funs> _basis_coeffs_x = {};
+	Vector<float, _num_basis_funs> _basis_coeffs_y = {};
+	Vector<float, _num_basis_funs> _basis_coeffs_z = {};
 
 	// control variables
-	Vector<float, _num_basis_funs> _basis_coeffs_x = {};				// coefficients of the current path
-	Vector<float, _num_basis_funs> _basis_coeffs_y = {};				// coefficients of the current path
-	Vector<float, _num_basis_funs> _basis_coeffs_z = {};				// coefficients of the current path
 	Vector3f _alpha_sp;
 	Vector3f _wind_estimate;											// wind estimate used internally in the controller
 	Vector3f _wind_estimate_EKF;										// wind estimate only used in the wind estimator
@@ -376,8 +382,6 @@ private:
 	float _shear_h_ref;
 	float _shear_heading;
 	float _shear_aspd;
-	// loiter circle
-	int _loiter;
 	// thrust
 	float _thrust;
 	float _thrust_pos;
@@ -386,16 +390,15 @@ private:
 	// ==================
 	// controller mode
 	bool _switch_manual;
-	// soaring mode
-	bool _switch_cl_soaring;
 	// force limit
 	bool _switch_saturation;
-	// use shear height from estimator
-	bool _switch_origin_hardcoded;
 	//
 	bool _switch_sitl;
-	//
-	bool _soaring_feasible;
+	// spiral mode switch
+	bool _switch_spiral;
+	// spiral cycle counter
+	int _spiral_cycle_counter;
+
 
 
 	bool _airspeed_valid{false};				///< flag if a valid airspeed estimate exists

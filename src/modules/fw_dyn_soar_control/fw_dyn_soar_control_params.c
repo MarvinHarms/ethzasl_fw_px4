@@ -581,36 +581,6 @@ PARAM_DEFINE_FLOAT(DS_THRUST, 0);
 PARAM_DEFINE_INT32(DS_SWITCH_SAT, 1);
 
 
-// ======================================================
-// ============= hardcoded trajectory center ============
-// ======================================================
-
-/**
- * integer in {0,1} defining if the trajectory origin is taken from hardcoded params or shear estimate, 1=params, 0=estimate
- * @unit 
- * @min 0
- * @max 1
- * @decimal 1
- * @increment 1
- * @group FW DYN SOAR Control
- */
-PARAM_DEFINE_INT32(DS_SWITCH_ORI_HC, 1);
-
-// =================================================
-// ============= loiter trajectory test ============
-// =================================================
-
-/**
- * integer in {0,1} defining if the loiter circle defined by param DS_LOITER shall be used, 0=soaring, 1=loiter
- * @unit 
- * @min 0
- * @max 1
- * @decimal 1
- * @increment 1
- * @group FW DYN SOAR Control
- */
-PARAM_DEFINE_INT32(DS_SWITCH_LOITER, 1);
-
 // ====================================================
 // ============= manual feedthrough switch ============
 // ====================================================
@@ -627,11 +597,11 @@ PARAM_DEFINE_INT32(DS_SWITCH_LOITER, 1);
 PARAM_DEFINE_INT32(DS_SWITCH_MANUAL, 1);
 
 // =====================================================
-// ============= open loop / closed loop DS ============
+// ============= spiral or loiter ============
 // =====================================================
 
 /**
- * integer in {0,1} defining if the shear parameters are changed by the estimator while soaring (closed loop). 0=fixed shear, 1=changing shear
+ * integer in {0,1} defining if we are in spiral or loiter mode
  * @unit 
  * @min 0
  * @max 1
@@ -639,7 +609,7 @@ PARAM_DEFINE_INT32(DS_SWITCH_MANUAL, 1);
  * @increment 1
  * @group FW DYN SOAR Control
  */
-PARAM_DEFINE_INT32(DS_SWITCH_CLOOP, 0);
+PARAM_DEFINE_INT32(DS_SWITCH_SPIRAL, 0);
 
 // =====================================================
 // ============= open loop / closed loop DS ============

@@ -78,8 +78,7 @@ FixedwingPositionINDIControl::init()
 		return false;
 	}
     PX4_INFO("Starting FW_DYN_SOAR_CONTROLLER");
-    char filename[] = "trajectory0.csv";
-    _read_trajectory_coeffs_csv(filename);
+    _read_trajectory_coeffs(0);
 
     // initialize transformations
     _R_ned_to_enu *= 0.f;
@@ -107,6 +106,10 @@ FixedwingPositionINDIControl::init()
 
     // fix sitl mode on startup (no switch at runtime)
     _switch_sitl = _param_switch_sitl.get();
+
+    // init spiral mode
+    _switch_spiral = false;
+    _spiral_cycle_counter = 0;
 
     // initialize transform to trajec frame
     _compute_trajectory_transform();
@@ -182,22 +185,20 @@ FixedwingPositionINDIControl::parameters_update()
     _thrust_pos = _param_thrust.get();
     _thrust = _thrust_pos;
     _switch_saturation = _param_switch_saturation.get();
-    _switch_origin_hardcoded = _param_switch_origin_hardcoded.get();
-    _switch_cl_soaring = _param_switch_cloop.get();
     if (_switch_sitl) {
         // only use switch manual param in sitl mode
         _switch_manual = _param_switch_manual.get();
     }
-
-    _loiter = _param_loiter.get();
-
-    // only update shear heading and height with params, if desired
-    if (_switch_origin_hardcoded) {
-        _shear_heading = _param_shear_heading.get()/180.f * M_PI_F + M_PI_2_F;
-        _shear_h_ref = _param_shear_height.get();
-        _select_loiter_trajectory();
+    _switch_spiral = _param_switch_spiral.get();
+    if (!_switch_spiral) {
+        // reset cycle counter, once we go back to loiter mode
+        _spiral_cycle_counter = 0;
+        _read_trajectory_coeffs(0);
     }
 
+
+    _shear_heading = _param_shear_heading.get()/180.f * M_PI_F + M_PI_2_F;
+    _shear_h_ref = _param_shear_height.get();
 
 	return PX4_OK;
 }
@@ -406,14 +407,14 @@ FixedwingPositionINDIControl::soaring_controller_status_poll()
 void
 FixedwingPositionINDIControl::soaring_estimator_shear_poll()
 {
-    if (!_switch_origin_hardcoded) {
+    if (!true) {
         if (_soaring_estimator_shear_sub.update(&_soaring_estimator_shear)){
             // update the shear estimate, only if we are flying in manual feedthrough for safety reasons
             _shear_v_max = _soaring_estimator_shear.v_max;
             _shear_alpha = _soaring_estimator_shear.alpha;
             _shear_h_ref = _soaring_estimator_shear.h_ref;
             _shear_heading = _soaring_estimator_shear.psi - M_PI_2_F;
-            _soaring_feasible =  _soaring_estimator_shear.soaring_feasible;
+            //_soaring_feasible =  _soaring_estimator_shear.soaring_feasible;
             // the initial speed of the target trajectory can safely be updated during soaring :)
             _shear_aspd = _soaring_estimator_shear.aspd;
         }
@@ -563,215 +564,28 @@ FixedwingPositionINDIControl::_float_to_str(float n, char* res, int afterpoint)
     }
 }
 
-void
-FixedwingPositionINDIControl::_select_loiter_trajectory()
-{
-
-    // select loiter trajectory for loiter test
-    char filename[16];
-    switch (_loiter)
-    {
-    case 0:
-        strcpy(filename,"trajectory0.csv");
-        break;
-    case 1:
-        strcpy(filename,"trajectory1.csv");
-        break;
-    case 2:
-        strcpy(filename,"trajectory2.csv");
-        break;
-    case 3:
-        strcpy(filename,"trajectory3.csv");
-        break;
-    case 4:
-        strcpy(filename,"trajectory4.csv");
-        break;
-    case 5:
-        strcpy(filename,"trajectory5.csv");
-        break;
-    case 6:
-        strcpy(filename,"trajectory6.csv");
-        break;
-    case 7:
-        strcpy(filename,"trajectory7.csv");
-        break;
-
-    default:
-        strcpy(filename,"trajectory0.csv");
-    }
-
-    /*
-    Also, we need to place the current trajectory, centered around zero height and assuming wind from the west, into the soaring frame.
-    Since the necessary computations for position, velocity and acceleration require the basis coefficients, which are not easy to transform, 
-    we choose to transform our position in soaring frame into the "trajectory frame", compute position vector and it's derivatives from the basis coeffs
-    in the trajectory frame, and then transform these back to soaring frame for control purposes.
-    Therefore we define a new transform between the soaring frame and the trajectory frame.
-    */
-    
-    _read_trajectory_coeffs_csv(filename);
-}
 
 void
-FixedwingPositionINDIControl::_select_soaring_trajectory()
+FixedwingPositionINDIControl::_read_trajectory_coeffs(int num_cycles)
 {
-    /* 
-    We read a trajectory based on initial energy available at the beginning of the trajectory.
-    So the trajectory is selected based on two criteria, first the correct wind shear params (alpha and V_max) and the initial energy (potential + kinetic).
-    
-    The filename structure of the trajectories is the following:
-    trajec_<type>_<V_max>_<alpha>_<energy>_
-    with
-    <type> in {nominal, robust}
-    <V_max> in [08,12]
-    <alpha> in [020, 100]
-    <energy> in [E_min, E_max]
-    */
-
-    char file[40] = "robust/coeffs_robust";
-    char v_str[3];
-    char a_str[3];
-    char e_str[3];
-    // get the correct filename
-    _float_to_str(_shear_v_max, v_str, 0);
-    _float_to_str(_shear_alpha*100.f, a_str, 0);
-    _float_to_str(_shear_aspd, e_str, 0);
-
-    strcat(file,"_");
-    strcat(file,v_str);
-    strcat(file,"_");
-    strcat(file,a_str);
-    strcat(file,"_");
-    strcat(file,e_str);
-    strcat(file,".csv");
-    PX4_INFO("filename: \t%.40s", file);
-    // get the basis coeffs from file
-    _read_trajectory_coeffs_csv(file);
-}
-
-void
-FixedwingPositionINDIControl::_read_trajectory_coeffs_csv(char *filename)
-{
-
-    // =======================================================================
-    bool error = false;
-
-    //char home_dir[200] = "/home/marvin/Documents/master_thesis_ADS/PX4/Git/ethzasl_fw_px4/src/modules/fw_dyn_soar_control/trajectories/";
-    char home_dir[200] = PX4_ROOTFSDIR"/fs/microsd/trajectories/";
-    //PX4_ERR(home_dir);
-    strcat(home_dir,filename);
-    FILE* fp = fopen(home_dir, "r");
-
-    if (fp == nullptr) {
-        PX4_ERR("Can't open file");
-        error = true;
+    if (!_switch_spiral) {
+        // read init trajectory if we are not spiralling
+        for (uint i=0; i<_num_basis_funs; i++) {
+            _basis_coeffs_x(i) = _basis_coeffs_init_x[i];
+            _basis_coeffs_y(i) = _basis_coeffs_init_y[i];
+            _basis_coeffs_z(i) = _basis_coeffs_init_z[i];
+        }
     }
     else {
-        // Here we have taken size of
-        // array 1024 you can modify it
-        const uint buffersize = _num_basis_funs*32;
-        char buffer[buffersize];
-
-        int row = 0;
-        int column = 0;
-
-        // loop over rows
-        while (fgets(buffer,
-                     buffersize, fp)) {
-            column = 0;
- 
-            // Splitting the data
-            char* value = strtok(buffer, ",");
-            
-            // loop over columns
-            while (value) {
-                if (*value=='\0'||*value==' ') {
-                    // simply skip extra characters
-                    continue;
-                }
-                switch(row){
-                    case 0:
-                        _basis_coeffs_x(column) = (float)atof(value);
-                        break;
-                    case 1:
-                        _basis_coeffs_y(column) = (float)atof(value);
-                        break;
-                    case 2:
-                        _basis_coeffs_z(column) = (float)atof(value);
-                        break;
-
-                    default:
-                        break;
-                }
-                //PX4_INFO("row: %d, col: %d, read value: %.3f", row, column, (double)atof(value));
-                value = strtok(NULL, ",");
-                column++;
-                
-            }
-            row++;
+        // read spiral trajectory
+        for (uint i=0; i<_num_basis_funs; i++) {
+            _basis_coeffs_x(i) = _basis_coeffs_spiral_x[i];
+            _basis_coeffs_y(i) = _basis_coeffs_spiral_y[i];
+            _basis_coeffs_z(i) = _basis_coeffs_spiral_z[i];
         }
-        int failure = fclose(fp);
-        if (failure==-1) {
-            PX4_ERR("Can't close file");
-        }
+        // append spiral primitive to the end of the previous cycle
+        _basis_coeffs_z(0) -= num_cycles*30.f;
     }
-    // =======================================================================
-
-
-    // go back to safety mode loiter circle
-    if(error){
-        // 100m radius circle trajec
-        _basis_coeffs_x(0) = 0.000038f;
-        _basis_coeffs_x(1) = 1812.140143f;
-        _basis_coeffs_x(2) = -6365.976106f;
-        _basis_coeffs_x(3) = 10773.875378f;
-        _basis_coeffs_x(4) = -9441.287977f;
-        _basis_coeffs_x(5) = 1439.744061f;
-        _basis_coeffs_x(6) = 6853.112823f;
-        _basis_coeffs_x(7) = -7433.361925f;
-        _basis_coeffs_x(8) = -72.566660f;
-        _basis_coeffs_x(9) = 7518.521784f;
-        _basis_coeffs_x(10) = -6807.858677f;
-        _basis_coeffs_x(11) = -1586.021605f;
-        _basis_coeffs_x(12) = 9599.405711f;
-        _basis_coeffs_x(13) = -10876.256865f;
-        _basis_coeffs_x(14) = 6406.017620f;
-        _basis_coeffs_x(15) = -1819.600542f;
-
-        _basis_coeffs_y(0) = -59.999852f;
-        _basis_coeffs_y(1) = -2811.660383f;
-        _basis_coeffs_y(2) = 13178.399227f;
-        _basis_coeffs_y(3) = -30339.925641f;
-        _basis_coeffs_y(4) = 43145.286828f;
-        _basis_coeffs_y(5) = -37009.839292f;
-        _basis_coeffs_y(6) = 9438.328009f;
-        _basis_coeffs_y(7) = 23631.637452f;
-        _basis_coeffs_y(8) = -38371.559953f;
-        _basis_coeffs_y(9) = 23715.306334f;
-        _basis_coeffs_y(10) = 9316.038368f;
-        _basis_coeffs_y(11) = -36903.451639f;
-        _basis_coeffs_y(12) = 43082.749551f;
-        _basis_coeffs_y(13) = -30315.482005f;
-        _basis_coeffs_y(14) = 13172.915247f;
-        _basis_coeffs_y(15) = -2811.186858f;
-
-        _basis_coeffs_z(0) = 30.0f;
-        _basis_coeffs_z(1) = 0.0f;
-        _basis_coeffs_z(2) = 0.0f;
-        _basis_coeffs_z(3) = 0.0f;
-        _basis_coeffs_z(4) = 0.0f;
-        _basis_coeffs_z(5) = 0.0f;
-        _basis_coeffs_z(6) = 0.0f;
-        _basis_coeffs_z(7) = 0.0f;
-        _basis_coeffs_z(8) = 0.0f;
-        _basis_coeffs_z(9) = 0.0f;
-        _basis_coeffs_z(10) = 0.0f;
-        _basis_coeffs_z(11) = 0.0f;
-        _basis_coeffs_z(12) = 0.0f;
-        _basis_coeffs_z(13) = 0.0f;
-        _basis_coeffs_z(14) = 0.0f;
-        _basis_coeffs_z(15) = 0.0f;
-     }
-
 }
 
 void
@@ -862,14 +676,6 @@ FixedwingPositionINDIControl::Run()
         // =================================
         float t_ref = _get_closest_t(_pos);
 
-        // =================================================================
-        // possibly select a new trajectory, if we are finishing the old one
-        // =================================================================
-        if (!_switch_origin_hardcoded && t_ref>=0.97f && (hrt_absolute_time()-_last_time_trajec)>1000000) {
-            _select_soaring_trajectory();
-            _last_time_trajec = hrt_absolute_time();
-        }
-
         // ============================
         // compute reference kinematics
         // ============================
@@ -902,6 +708,26 @@ FixedwingPositionINDIControl::Run()
         ocm.actuator = true;
         ocm.timestamp = hrt_absolute_time();
         _offboard_control_mode_pub.publish(ocm);
+
+        // =================================================================
+        // possibly select a new trajectory, if we are finishing the old one
+        // =================================================================!_switch_origin_hardcoded && 
+        if (t_ref>=0.97f && (hrt_absolute_time()-_last_time_trajec)>1000000) {
+            _read_trajectory_coeffs(_spiral_cycle_counter);
+            _last_time_trajec = hrt_absolute_time();
+            // reset cycle counter, if we are in loiter mode
+            if (!_switch_spiral) {
+                _spiral_cycle_counter = 0;
+            }
+            // increment cycle counter, if we are finishing a spiral primitive
+            else {
+                _spiral_cycle_counter += 1;
+            }
+        }
+
+        if (_switch_spiral) {
+            _thrust = 0.f;
+        }
 
         // Publish actuator controls only once in OFFBOARD
 		if (_vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_OFFBOARD) {
@@ -992,7 +818,7 @@ FixedwingPositionINDIControl::Run()
             _soaring_controller_wind.position[1] = _pos(1);
             _soaring_controller_wind.position[2] = _pos(2);
             _soaring_controller_wind.airspeed = _true_airspeed;
-            if (_switch_cl_soaring) {
+            if (false) {
                 // always update shear params in closed loop soaring mode
                 _soaring_controller_wind.lock_params = false;
             }
@@ -1062,11 +888,13 @@ FixedwingPositionINDIControl::_get_basis_funs(float t)
 {
     Vector<float, _num_basis_funs> vec;
     vec(0) = 1.0f;
-    float sigma = 1.0f/_num_basis_funs;
-    for(uint i=1; i<_num_basis_funs; i++){
+    vec(1) = t;
+    vec(2) = 1.0f-t;
+    float sigma = 0.5f/(_num_basis_funs-2);
+    for(uint i=1; i<(_num_basis_funs-2); i++){
         float fun1 = sinf(M_PI_F*t);
-        float fun2 = exp(-powf((t-float(i)/float(_num_basis_funs)),2)/sigma);
-        vec(i) = fun1*fun2;
+        float fun2 = exp(-powf((t-float(i)/float(_num_basis_funs-2)),2)/sigma);
+        vec(i+2) = fun1*fun2;
     }
     return vec;
 }
@@ -1076,11 +904,13 @@ FixedwingPositionINDIControl::_get_d_dt_basis_funs(float t)
 {
     Vector<float, _num_basis_funs> vec;
     vec(0) = 0.0f;
-    float sigma = 1.0f/_num_basis_funs;
-    for(uint i=1; i<_num_basis_funs; i++){
+    vec(1) = 1.f;
+    vec(2) = -1.f;
+    float sigma = 0.5f/(_num_basis_funs-2);
+    for(uint i=1; i<(_num_basis_funs-2); i++){
         float fun1 = sinf(M_PI_F*t);
-        float fun2 = exp(-powf((t-float(i)/_num_basis_funs),2)/sigma);
-        vec(i) = fun2*(M_PI_F*sigma*cosf(M_PI_F*t)-2*(t-float(i)/_num_basis_funs)*fun1)/sigma;
+        float fun2 = exp(-powf((t-float(i)/(_num_basis_funs-2)),2)/sigma);
+        vec(i+2) = fun2*(M_PI_F*sigma*cosf(M_PI_F*t)-2*(t-float(i)/(_num_basis_funs-2))*fun1)/sigma;
     }
     return vec;
 }
@@ -1090,12 +920,14 @@ FixedwingPositionINDIControl::_get_d2_dt2_basis_funs(float t)
 {
     Vector<float, _num_basis_funs> vec;
     vec(0) = 0.0f;
-    float sigma = 1.0f/_num_basis_funs;
-    for(uint i=1; i<_num_basis_funs; i++){
+    vec(1) = 0.0f;
+    vec(2) = 0.0f;
+    float sigma = 0.5f/(_num_basis_funs-2);
+    for(uint i=1; i<(_num_basis_funs-2); i++){
         float fun1 = sinf(M_PI_F*t);
-        float fun2 = exp(-powf((t-float(i)/_num_basis_funs),2)/sigma);
-        vec(i) = fun2 * (fun1 * (4*powf((float(i)/_num_basis_funs-t),2) - \
-                        sigma*(powf(M_PI_F,2)*sigma + 2)) + 4*M_PI_F*sigma*(float(i)/_num_basis_funs-t)*cosf(M_PI_F*t))/(powf(sigma,2));
+        float fun2 = exp(-powf((t-float(i)/(_num_basis_funs-2)),2)/sigma);
+        vec(i+2) = fun2 * (fun1 * (4*powf((float(i)/(_num_basis_funs-2)-t),2) - \
+                        sigma*(powf(M_PI_F,2)*sigma + 2)) + 4*M_PI_F*sigma*(float(i)/(_num_basis_funs-2)-t)*cosf(M_PI_F*t))/(powf(sigma,2));
  
     }
     return vec;
