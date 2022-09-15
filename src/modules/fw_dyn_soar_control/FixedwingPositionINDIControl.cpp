@@ -701,18 +701,10 @@ FixedwingPositionINDIControl::Run()
         // ============================
         Vector3f ctrl2 = _compute_actuator_deflections(ctrl1);
 
-        // =================================
-        // publish offboard control commands
-        // =================================
-        offboard_control_mode_s ocm{};
-        ocm.actuator = true;
-        ocm.timestamp = hrt_absolute_time();
-        _offboard_control_mode_pub.publish(ocm);
-
         // =================================================================
         // possibly select a new trajectory, if we are finishing the old one
-        // =================================================================!_switch_origin_hardcoded && 
-        if (t_ref>=0.97f && (hrt_absolute_time()-_last_time_trajec)>1000000) {
+        // =================================================================
+        if (!_switch_manual && t_ref>=0.97f && (hrt_absolute_time()-_last_time_trajec)>1000000) {
             _read_trajectory_coeffs(_spiral_cycle_counter);
             _last_time_trajec = hrt_absolute_time();
             // reset cycle counter, if we are in loiter mode
@@ -725,9 +717,18 @@ FixedwingPositionINDIControl::Run()
             }
         }
 
-        if (_switch_spiral) {
+        if (_switch_spiral && !_switch_manual) {
             _thrust = 0.f;
         }
+ 
+
+        // =================================
+        // publish offboard control commands
+        // =================================
+        offboard_control_mode_s ocm{};
+        ocm.actuator = true;
+        ocm.timestamp = hrt_absolute_time();
+        _offboard_control_mode_pub.publish(ocm);
 
         // Publish actuator controls only once in OFFBOARD
 		if (_vehicle_status.nav_state == vehicle_status_s::NAVIGATION_STATE_OFFBOARD) {
@@ -841,6 +842,7 @@ FixedwingPositionINDIControl::Run()
             if (_counter==100) {
                 _counter = 0;
                 //PX4_INFO("Feedthrough switch: \t%.2f", (double)(_rc_channels.channels[5]));
+                //PX4_INFO("manual switch: \t%.2f", (double)(_switch_manual));
                 //PX4_INFO("frequency: \t%.3f", (double)(1000000*100)/(hrt_absolute_time()-_last_time));
                 _last_time = hrt_absolute_time();
             }
